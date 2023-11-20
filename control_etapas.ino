@@ -15,8 +15,8 @@
 byte i=0, pinPwm = 16;
 byte etapaPrograma = 0;
 volatile short medicion = 0, referenciaControl = 1100;
-volatile short  tensionCargandose = 0, estadoDeCarga = 0;
-volatile short corrienteCargandose = 0, tensionSinCargarse = 0; 
+volatile short tensionCargandose = 0,corrienteCargandose = 0;
+volatile float estadoDeCarga = 0;  
 volatile short tensionAMantenerConstante = 0;
 volatile short ultimasMedicionesTension[5] = {0,0,0,0,0}, ultimasMedicionesCorriente[5] = {0,0,0,0,0};
 volatile short promUltimasMedicionesTension = 0, promUltimasMedicionesCorriente = 0;
@@ -28,9 +28,13 @@ volatile byte msb, lsb;
 ////////////////// Declaración de cred WIFI //////////////////
 AsyncWebServer server(80);
 
-
-const char* ssid = "PONER_RED_ACA";
-const char* password = "PONER_CONTRASEÑA_RED";
+// const char* ssid = "Electrocoop";
+// const char* password = "electrothevening";
+const char* ssid = "WIFI_SCPL618611_EXT";
+const char* password = "1861a12345";
+//
+//const char* ssid = "Control";
+//const char* password = "Lyapunov";
 
 
 ////////////////// Subrutina de interrupción timer 0 //////////////////
@@ -160,8 +164,12 @@ void setup() {
   analogWriteResolution(12);
   analogWriteFrequency(1/(0.000055));
   analogWrite(pinPwm,LOW);
-
+  
   estadoDeCarga = socVsTension();
+
+  if( promUltimasMedicionesTension > 3440){    // mayor a 4.2 V
+    etapaPrograma = 3;
+  }
   
   // timer 1 interrumpe cada 5 segundos
   Timer1_Cfg = timerBegin(1, 16000, true);
@@ -232,6 +240,10 @@ void loop2(void* pvParameters){
         case 3:
             etapaPrograma = 3;
         break;
+      }
+
+      if( promUltimasMedicionesTension > 3500){    // mayor a 4.3 V
+        etapaPrograma = 3;
       }
       
       WebSerial.println("  ");
