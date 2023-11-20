@@ -1,0 +1,247 @@
+// Version de control con etapas (de prueba)
+//
+// En esta versión se realiza la carga siguiendo el perfil CC-CV a
+// modo demostrativo,
+// midiendo y presentando tensión, corriente y SoC.
+// 
+
+#include <SPI.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+#include <WebSerial.h>
+#include <esp_task_wdt.h>
+
+////////////////// Declaración de variables //////////////////
+byte i=0, pinPwm = 16;
+byte etapaPrograma = 0, cambioDeEtapa = 0;
+volatile short medicion = 0, referenciaControl = 1100;
+volatile short tensionCargandose = 0,corrienteCargandose = 0;
+volatile float estadoDeCarga = 0;  
+volatile short tensionAMantenerConstante = 0;
+volatile short ultimasMedicionesTension[5] = {0,0,0,0,0}, ultimasMedicionesCorriente[5] = {0,0,0,0,0};
+volatile short promUltimasMedicionesTension = 0, promUltimasMedicionesCorriente = 0;
+float datosV[] = {2.75, 2.89, 3.10, 3.22, 3.28, 3.33, 3.37, 3.42, 3.45, 3.47, 3.49, 3.51, 3.54, 3.56, 3.57, 3.59, 3.60, 3.61, 3.62, 3.62, 3.63, 3.64, 3.64, 3.65, 3.65, 3.66, 3.67, 3.67, 3.67, 3.68, 3.68, 3.70, 3.71, 3.73, 3.74, 3.75, 3.76, 3.78, 3.80, 3.81, 3.81, 3.82, 3.82, 3.83, 3.83, 3.84, 3.85, 3.86, 3.87, 3.87, 3.88, 3.89, 3.90, 3.91, 3.92, 3.93, 3.94, 3.96, 3.97, 3.99, 4.00, 4.01, 4.03, 4.05, 4.08, 4.11, 4.14, 4.17, 4.20};
+byte datosSoC[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 35, 40, 45, 50, 55, 60, 65, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100};
+volatile float  D = 0, y_n = 0, y_n_1 = 0, x_n = 0, x_n_1 = 0;
+volatile byte msb, lsb; 
+
+////////////////// Declaración de cred WIFI //////////////////
+AsyncWebServer server(80);
+
+// const char* ssid = "Electrocoop";
+// const char* password = "electrothevening";
+const char* ssid = "WIFI_SCPL618611_EXT";
+const char* password = "1861a12345";
+//
+//const char* ssid = "Control";
+//const char* password = "Lyapunov";
+
+
+////////////////// Subrutina de interrupción timer 0 //////////////////
+hw_timer_t *Timer0_Cfg = NULL;
+void IRAM_ATTR Timer0_ISR(){
+    medicion = leerADC1();
+    i = 1 ;
+}
+
+////////////////// Subrutina de interrupción timer 1 //////////////////
+hw_timer_t *Timer1_Cfg = NULL;
+void IRAM_ATTR Timer1_ISR(){  
+  timerStop(Timer0_Cfg);
+  corrienteCargandose = leerADC1();
+  tensionCargandose = leerADC0();
+  estadoDeCarga = estadoDeCarga + ( 5*2.5*promUltimasMedicionesCorriente) / (4096*3600*2.6);
+  
+  ultimasMedicionesTension[0] = tensionCargandose;
+  for(int j = 0; j <=3; j++){
+    ultimasMedicionesTension[j+1] = ultimasMedicionesTension[j];
+  }
+  promUltimasMedicionesTension = 0;
+  for(int j = 0; j <= 4; j++){
+    promUltimasMedicionesTension = promUltimasMedicionesTension + ultimasMedicionesTension[j];
+  }
+  promUltimasMedicionesTension = promUltimasMedicionesTension / 5;
+  
+
+  ultimasMedicionesCorriente[0] = corrienteCargandose;
+  for(int j = 0; j <=3; j++){
+    ultimasMedicionesCorriente[j+1] = ultimasMedicionesCorriente[j];
+  }
+  promUltimasMedicionesCorriente = 0;
+  for(int j = 0; j <= 4; j++){
+    promUltimasMedicionesCorriente = promUltimasMedicionesCorriente + ultimasMedicionesCorriente[j];
+  }
+  promUltimasMedicionesCorriente = promUltimasMedicionesCorriente / 5;
+
+  if(cambioDeEtapa <= 5){
+    Serial.println(cambioDeEtapa);
+    cambioDeEtapa += 1;
+  }
+  else{
+    cambioDeEtapa = 0;
+  }
+  
+  timerRestart(Timer0_Cfg);
+  timerStart(Timer0_Cfg);
+}
+
+
+////////////////// Funciones de lectura de ADC //////////////////
+int leerADC0(){
+  digitalWrite(SS,LOW);                
+  SPI.transfer(0b00000110);           
+  msb = SPI.transfer(0b00000000);     
+  lsb = SPI.transfer(0b00000000);     
+  digitalWrite(SS,HIGH);              
+  msb = msb & 0b00001111;  
+  return int(msb << 8 | lsb);
+}
+
+int leerADC1(){
+  digitalWrite(SS,LOW);                
+  SPI.transfer(0b00000110);           
+  msb = SPI.transfer(0b01000000);     
+  lsb = SPI.transfer(0b00000000);     
+  digitalWrite(SS,HIGH);
+  msb = msb & 0b00001111;
+  return int(msb << 8 | lsb);
+}
+
+//////////////// Tabla de SoC versus tensión medida //////////////////
+int socVsTension(){
+  for(int j = 0; j <=4 ; j++){
+    ultimasMedicionesTension[j] = leerADC0();
+    delay(100);
+  }
+  for(int j = 0; j <=4 ; j++){
+    ultimasMedicionesCorriente[j] = leerADC1();
+    delay(100);
+  }
+  for(int j = 0; j <= 4; j++){
+    promUltimasMedicionesTension = promUltimasMedicionesTension + ultimasMedicionesTension[j];
+  }
+  promUltimasMedicionesTension = promUltimasMedicionesTension / 5;
+  int k = 0;
+  if (2*2.5*promUltimasMedicionesTension/(4096.0)>datosV[0]){
+   for(k; (2*2.5*promUltimasMedicionesTension/(4096.0)>datosV[k]); k++){
+    }
+  }
+  else{
+    k = 0;
+  }
+  return datosSoC[k];
+}
+
+////////////////// Funciones que se ejecutan en el programa //////////////////
+void lazoControl(){
+    analogWrite(pinPwm,D);
+    if (i == 1){
+      x_n_1 = x_n ;
+      x_n = referenciaControl - medicion ;
+      y_n_1 = y_n ;
+      y_n = y_n_1 + 0.00105*x_n + 0.00095*x_n_1 ;
+      D = y_n + 1843 ;
+      i = 0;
+    }
+}
+
+////////////////// Programa que se ejecuta solo en el inicio //////////////////
+void setup() {
+  Serial.begin(19200);  
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  SPI.begin();
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    Serial.printf("WiFi Failed!\n");
+    return;
+  }
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  WebSerial.begin(&server);
+  server.begin();
+  
+  xTaskCreatePinnedToCore(loop2,"loop2",5000,NULL,0,NULL,0);
+  disableCore1WDT();
+  disableCore0WDT();
+
+  pinMode(2,OUTPUT);
+  pinMode(SS,OUTPUT);
+  pinMode(pinPwm, OUTPUT);
+  analogWriteResolution(12);
+  analogWriteFrequency(1/(0.000055));
+  analogWrite(pinPwm,LOW);
+  
+  estadoDeCarga = socVsTension();
+
+  if( promUltimasMedicionesTension > 3440){    // mayor a 4.2 V
+    etapaPrograma = 3;
+  }
+  
+  // timer 1 interrumpe cada 5 segundos
+  Timer1_Cfg = timerBegin(1, 16000, true);
+  timerAttachInterrupt(Timer1_Cfg, &Timer1_ISR, true);
+  timerAlarmWrite(Timer1_Cfg, 25000, true);
+  timerAlarmEnable(Timer1_Cfg);
+
+  // timer 0 interrumpe cada 110 uS (9,090 kHz)
+  Timer0_Cfg = timerBegin(0, 16, true);
+  timerAttachInterrupt(Timer0_Cfg, &Timer0_ISR, true);
+  timerAlarmWrite(Timer0_Cfg, 550, true);
+  timerAlarmEnable(Timer0_Cfg);
+}
+
+
+////////////////// Programa principal (nucleo 1) //////////////////
+void loop() { 
+    while(etapaPrograma < 3){
+     lazoControl();  
+    }
+    analogWrite(pinPwm,LOW);
+    digitalWrite(2,!digitalRead(2));
+    delay(500);
+}
+
+
+////////////////// Programa que se ejecuta en el nucleo 0 //////////////////
+void loop2(void* pvParameters){
+    for(;;){
+
+    if(cambioDeEtapa == 5){
+      Serial.println(cambioDeEtapa);
+      etapaPrograma += 1;
+      Serial.println(etapaPrograma);
+      cambioDeEtapa = 0;
+    }
+    if (etapaPrograma > 3){
+      etapaPrograma = 3;
+    }
+
+      switch (etapaPrograma){
+        case 0:
+            referenciaControl = 1100;
+        break;
+        case 1:
+            referenciaControl += 200;
+        break;
+        case 2:
+            referenciaControl -= 200; 
+        break;
+        case 3:
+            etapaPrograma = 3;
+        break;
+      }
+
+      
+      WebSerial.println("  ");
+      WebSerial.println("Etapa del programa = "+String(etapaPrograma));
+      WebSerial.println("Tension = "+String(2*2.5*promUltimasMedicionesTension/(4096.0))+" V");
+      WebSerial.println("Corriente = "+String(2.5*promUltimasMedicionesCorriente/(4096.0))+" A");
+      WebSerial.println("Estado de Carga = "+String(estadoDeCarga)+" %");
+      WebSerial.println("  ");
+      WebSerial.println("--------------");
+      delay(4700); 
+    }
+}
